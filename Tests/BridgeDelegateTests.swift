@@ -3,6 +3,7 @@ import XCTest
 import WebKit
 @testable import Strada
 
+@MainActor
 class BridgeDelegateTests: XCTestCase {
     private var delegate: BridgeDelegate!
     private var destination: AppBridgeDestination!
@@ -22,8 +23,11 @@ class BridgeDelegateTests: XCTestCase {
         delegate.onViewDidLoad()
     }
     
-    func testBridgeDidInitialize() {
-        delegate.bridgeDidInitialize()
+    func testBridgeDidInitialize() async throws {
+        await withCheckedContinuation { continuation in
+            bridge.registerComponentsContinuation = continuation
+            delegate.bridgeDidInitialize()
+        }
         
         XCTAssertTrue(bridge.registerComponentsWasCalled)
         XCTAssertEqual(bridge.registerComponentsArg, ["one", "two"])
@@ -70,6 +74,55 @@ class BridgeDelegateTests: XCTestCase {
                               jsonData: json)
         
         XCTAssertFalse(delegate.bridgeDidReceiveMessage(message))
+    }
+    
+    // Web view URL takes precedence over the provided location.
+    func test_bridgeHandlesRedirectedWebViewURL() {
+        let redirectedLocation = "https://37signals.com/sign-in"
+        bridge.webView = RedirectedWebView(location: redirectedLocation)
+        
+        let message = Message(id: "1",
+                              component: "two",
+                              event: "connect",
+                              metadata: .init(url: redirectedLocation),
+                              jsonData: json)
+        
+        var component: BridgeComponentSpy? = delegate.component()
+        
+        XCTAssertNil(component)
+        XCTAssertTrue(delegate.bridgeDidReceiveMessage(message))
+        
+        component = delegate.component()
+        
+        XCTAssertNotNil(component)
+        // Make sure the component has delegate set, and did receive the message.
+        XCTAssertTrue(component!.onReceiveMessageWasCalled)
+        XCTAssertEqual(component?.onReceiveMessageArg, message)
+        XCTAssertNotNil(component?.delegate)
+    }
+    
+    // When web view URL is nil, the bride delegate falls back to the original location.
+    func test_bridgeFallsbackToOriginalDestination() {
+        bridge.webView = RedirectedWebView(location: nil)
+        
+        let message = Message(id: "1",
+                              component: "two",
+                              event: "connect",
+                              metadata: .init(url: "https://37signals.com"),
+                              jsonData: json)
+        
+        var component: BridgeComponentSpy? = delegate.component()
+        
+        XCTAssertNil(component)
+        XCTAssertTrue(delegate.bridgeDidReceiveMessage(message))
+        
+        component = delegate.component()
+        
+        XCTAssertNotNil(component)
+        // Make sure the component has delegate set, and did receive the message.
+        XCTAssertTrue(component!.onReceiveMessageWasCalled)
+        XCTAssertEqual(component?.onReceiveMessageArg, message)
+        XCTAssertNotNil(component?.delegate)
     }
     
     func testBridgeIgnoresMessageForInactiveDestination() {
@@ -143,20 +196,20 @@ class BridgeDelegateTests: XCTestCase {
     
     // MARK: reply(with:)
    
-    func test_replyWithSucceedsWhenBridgeIsSet() {
+    func test_replyWithSucceedsWhenBridgeIsSet() async throws {
         let message = testMessage()
-        let success = delegate.reply(with: message)
-        
+        let success = try await delegate.reply(with: message)
+
         XCTAssertTrue(success)
         XCTAssertTrue(bridge.replyWithMessageWasCalled)
         XCTAssertEqual(bridge.replyWithMessageArg, message)
     }
     
-    func test_replyWithFailsWhenBridgeNotSet() {
+    func test_replyWithFailsWhenBridgeNotSet() async throws {
         delegate.bridge = nil
 
         let message = testMessage()
-        let success = delegate.reply(with: message)
+        let success = try await delegate.reply(with: message)
 
         XCTAssertFalse(success)
         XCTAssertFalse(bridge.replyWithMessageWasCalled)
@@ -170,4 +223,25 @@ class BridgeDelegateTests: XCTestCase {
                        metadata: .init(url: "https://37signals.com"),
                        jsonData: json)
     }
+}
+
+private final class RedirectedWebView: WKWebView {
+    init(location: String?) {
+        self.location = location
+        super.init(frame: .zero, configuration: WKWebViewConfiguration())
+    }
+    
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+    
+    override var url: URL? {
+        guard let location else { return nil }
+        
+        return URL(string: location)
+    }
+    
+    // MARK: Private
+    
+    private let location: String?
 }
